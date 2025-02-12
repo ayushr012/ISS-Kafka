@@ -1,45 +1,56 @@
 import findspark
 findspark.init()
 
-from pyspark import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.streaming import StreamingContext
-from pyspark.streaming.kafka import KafkaUtils
-import json
-import time
+from pyspark.sql.functions import from_json, col
+from pyspark.sql.types import StructType, StructField, StringType
 
-if __name__=="__main__":
-    
-    #sc=SparkContext(appname="Kafka Spark Demo")
-    
-    spark=SparkSession.builder.master("local").appname("Kafka Spark Demo") \
-    .config("spark.jars.packages","org.apache.spark:spark-sql-kafka-0-10_2.13:3.2.1") \
-    .getOrCreate()
-    
-    sc=spark.sparkContext
-    
-    ssc=StreamingContext(sc,20)
-    
-    message=KafkaUtils.createDirectStream(ssc,topics=['testtopic'],kafkaParams={"metadata.broker.list":"localhost:9092"})
-    
-    #data is kafka streamed RDD
-    data=message.map(lambda x: x[1])
-    
-    def functordd(rdd):
-        try:
-            rdd1=rdd.map(lambda x: json.loads(x))
-            df=spark.read.json(rdd1)
-            df.show()
-            df.createOrReplaceTempView("Test")
-            df1=spark.sql("select iss_position.latitude,iss_position.longitude,message,timestamp from Test")
-        
-            df1.write.format('csv').mode('append').save("testing")
-        
-        except:
-            pass
-    
-    data.foreachRDD(functordd)
-    
-    ssc.start()
-    ssc.awaitTermination()
-    
+if __name__ == "__main__":
+    # Initialize Spark Session
+    spark = SparkSession.builder.master("local[*]").appName("KafkaSparkDemo") \
+        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:3.2.1") \
+        .getOrCreate()
+
+    # Define Kafka Stream
+    kafka_df = spark.readStream.format("kafka") \
+        .option("kafka.bootstrap.servers", "localhost:9092") \
+        .option("subscribe", "testtopic") \
+        .option("startingOffsets", "latest") \
+        .load()
+
+    # Define JSON Schema
+    schema = StructType([
+        StructField("message", StringType(), True),
+        StructField("timestamp", StringType(), True),
+        StructField("iss_position", StructType([
+            StructField("latitude", StringType(), True),
+            StructField("longitude", StringType(), True)
+        ]))
+    ])
+
+    # Parse JSON Messages
+    parsed_df = kafka_df.selectExpr("CAST(value AS STRING)").select(from_json(col("value"), schema).alias("data"))
+
+    # Flatten JSON Fields
+    flattened_df = parsed_df.select(
+        col("data.iss_position.latitude"),
+        col("data.iss_position.longitude"),
+        col("data.message"),
+        col("data.timestamp")
+    )
+
+    # Write to Console (for Debugging)
+    query = flattened_df.writeStream \
+        .outputMode("append") \
+        .format("console") \
+        .start()
+
+    # Save to CSV
+    query_csv = flattened_df.writeStream \
+        .outputMode("append") \
+        .format("csv") \
+        .option("path", "testing") \
+        .option("checkpointLocation", "checkpoint/") \
+        .start()
+
+    query.awaitTermination()
